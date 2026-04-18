@@ -17,6 +17,9 @@
 #define S4 11
 #define S5 12
 
+// ===== PROXIMITY SENSOR PIN =====
+#define PROXIMITY_PIN A0
+
 AccelStepper leftMotor(AccelStepper::DRIVER, L_STEP, L_DIR);
 AccelStepper rightMotor(AccelStepper::DRIVER, R_STEP, R_DIR);
 
@@ -26,6 +29,9 @@ float Kd = 220;
 int baseSpeed = 200;
 
 float previousError = 0;
+
+// ===== CHECKPOINT TRACKING =====
+int currentProjectCount = 0;
 
 // ===== BLE SETUP =====
 BLEService uartService("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
@@ -60,6 +66,9 @@ void setup() {
   pinMode(S4, INPUT);
   pinMode(S5, INPUT);
 
+  pinMode(PROXIMITY_PIN, INPUT);
+
+  // Invert right motor if necessary based on your wiring
   rightMotor.setPinsInverted(true, false, false);
 
   leftMotor.setMaxSpeed(800);
@@ -76,11 +85,11 @@ void setup() {
   BLE.addService(uartService);
   BLE.advertise();
 
-  Serial.println("[SYSTEM] Ready - Waiting for PERSON");
+  Serial.println("[SYSTEM] Ready - Waiting for PERSON from Jetson");
 }
 
 // ==========================================
-// LINE FOLLOWING
+// LINE FOLLOWING 
 // ==========================================
 void followLineForward() {
   int s1 = digitalRead(S1);
@@ -117,33 +126,105 @@ void followLineForward() {
   }
 }
 
-// ==========================================
-// STOP MOTORS
-// ==========================================
+void followLineBackward() {
+  leftMotor.setSpeed(-baseSpeed);
+  rightMotor.setSpeed(-baseSpeed);
+}
+
 void stopMotors() {
   leftMotor.setSpeed(0);
   rightMotor.setSpeed(0);
 }
 
 // ==========================================
-// RUN PROJECT (LINE FOLLOW)
+// TARGET PROJECT LOGIC (WITH JETSON SYNC)
 // ==========================================
-void runProject() {
-  Serial.println("MOVING");   // 🔥 Notify Jetson
+void runToProject(int targetProject) {
+  if (targetProject == currentProjectCount) {
+    Serial.print("Already at Project: ");
+    Serial.println(currentProjectCount);
+    // Tell Jetson we are done immediately so it can explain
+    Serial.println("DONE"); 
+    return;
+  }
 
+  // 🔥 CRITICAL: Tells Jetson run.py to pause camera
+  Serial.println("MOVING"); 
+
+  char direction = (targetProject > currentProjectCount) ? 'F' : 'B';
   previousError = 0;
+  
+  unsigned long lastSensorPrint = 0;
+  unsigned long lastCheckpointTime = 0; 
 
-  unsigned long startTime = millis();
+  int triggerThreshold = 850; 
+  int clearThreshold = 950;   
 
-  while (millis() - startTime < 5000) {
-    followLineForward();
+  bool isOnCheckpoint = (analogRead(PROXIMITY_PIN) < triggerThreshold); 
+
+  while (currentProjectCount != targetProject) {
+    int proxVal = analogRead(PROXIMITY_PIN);
+
+    // Limit prints so we don't overflow the Jetson's serial buffer
+    if (millis() - lastSensorPrint > 250) {
+      Serial.print("PROX: ");
+      Serial.print(proxVal);
+      Serial.print(" | FLAG: ");
+      Serial.println(isOnCheckpoint ? "LOCKED" : "CLEAR");
+      lastSensorPrint = millis();
+    }
+
+    // --- 1. TRIGGER LOGIC (< 850) ---
+    if (proxVal < triggerThreshold) {
+      if (!isOnCheckpoint) {
+        if (direction == 'F') currentProjectCount++;
+        else currentProjectCount--;
+        
+        isOnCheckpoint = true; 
+        lastCheckpointTime = millis(); 
+        
+        Serial.print("Passed Checkpoint! Count is now: ");
+        Serial.println(currentProjectCount);
+      }
+    } 
+    // --- 2. UNLOCK LOGIC (> 950 + 800ms Delay) ---
+    else if (proxVal > clearThreshold) {
+      if (isOnCheckpoint && (millis() - lastCheckpointTime > 800)) {
+        isOnCheckpoint = false; 
+      }
+    }
+
+    // --- MANUAL STOP FROM APP ---
+    if (rxCharacteristic.written()) {
+      char emergencyCmd = (char)rxCharacteristic.value();
+      if (emergencyCmd == 'S') {
+        Serial.println("MANUAL STOP TRIGGERED!");
+        break; 
+      }
+    }
+
+    // --- TARGET REACHED ---
+    if (currentProjectCount == targetProject) {
+      break; 
+    }
+
+    // --- MOVEMENT ---
+    if (direction == 'F') {
+      followLineForward();
+    } else {
+      followLineBackward(); 
+    }
+
     leftMotor.runSpeed();
     rightMotor.runSpeed();
   }
 
   stopMotors();
+  Serial.print("ARRIVED AT PROJECT: ");
+  Serial.println(currentProjectCount); 
 
-  Serial.println("DONE");     // 🔥 Notify Jetson
+  // 🔥 CRITICAL: Tells Jetson run.py to resume camera and play explanation
+  Serial.println("DONE"); 
 }
 
 // ==========================================
@@ -153,24 +234,34 @@ void handleBLE() {
   BLEDevice central = BLE.central();
 
   if (central) {
-    Serial.println("[BLE] Connected");
+    Serial.println("[BLE] App Connected!");
 
     while (central.connected()) {
+      // Check for Jetson commands even while connected to BLE
+      if (Serial.available()) {
+        String data = Serial.readStringUntil('\n');
+        data.trim();
+        if (data == "PERSON") {
+          stopMotors();
+          currentMode = IDLE;
+          return; // Exit BLE handler to stop everything
+        }
+      }
 
       if (rxCharacteristic.written()) {
         char cmd = (char)rxCharacteristic.value();
 
-        Serial.print("[BLE RECEIVED]: ");
+        Serial.print("BLE COMMAND RECEIVED: ");
         Serial.println(cmd);
 
-        // 🔥 START PROJECT ONLY ON USER INPUT
-        if (cmd == 'F' || cmd == 'A') {
+        if (cmd == '1' || cmd == '2' || cmd == '3' || cmd == '4') {
+          int target = cmd - '0'; 
           currentMode = RUNNING;
-          runProject();
-          currentMode = IDLE;
+          runToProject(target);
+          currentMode = IDLE; // Wait for next Jetson cycle
           return;
         }
-
+        
         if (cmd == 'S') {
           stopMotors();
         }
@@ -180,7 +271,7 @@ void handleBLE() {
       rightMotor.runSpeed();
     }
 
-    Serial.println("[BLE] Disconnected");
+    Serial.println("[BLE] App Disconnected. Advertising again...");
     BLE.advertise();
   }
 }
@@ -189,25 +280,19 @@ void handleBLE() {
 // MAIN LOOP
 // ==========================================
 void loop() {
-
   // 🔹 SERIAL FROM JETSON
   if (Serial.available()) {
     String data = Serial.readStringUntil('\n');
     data.trim();
 
-    Serial.print("[JETSON → ARDUINO]: ");
-    Serial.println(data);
-
     // ✅ PERSON → STOP EVERYTHING
     if (data == "PERSON") {
-      Serial.println("[STATE] Person detected → stopping robot");
       stopMotors();
       currentMode = IDLE;
     }
 
     // ✅ ENABLE BLE AFTER GREETING
     else if (data == "ASK_PROJECT") {
-      Serial.println("[STATE] Waiting for project selection via BLE");
       currentMode = BLE_MODE;
     }
   }
