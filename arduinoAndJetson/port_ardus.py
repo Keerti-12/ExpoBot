@@ -1,67 +1,82 @@
 def connect_arduinos():
-    """Dynamically grabs the active ports based on chip type, ignoring the shifting numbers."""
-    print("[SYSTEM] Connecting to Arduino ports dynamically...")
+    """
+    Bulletproof connection manager. Scans all ports and blocks the entire 
+    program in a loop until BOTH the Uno and Mega are verified.
+    """
+    print("\n[SYSTEM] =========================================")
+    print("[SYSTEM] Hunting for Arduinos...")
+    
     uno_serial = None
     mega_serial = None
     
-    # glob.glob reads the active ports connected right at this second
-    usb_ports = glob.glob('/dev/ttyUSB*') # Always the Mega (CH340 clone chip)
-    acm_ports = glob.glob('/dev/ttyACM*') # Always the Uno (Native USB chip)
-
-    # ------------------------------------------------
-    # 1. CONNECT TO MEGA
-    # ------------------------------------------------
-    if usb_ports:
-        mega_port = usb_ports[0] # Grab whatever number it is today (0, 1, or 2)
-        try:
-            print(f"[SYSTEM] Attempting MEGA on {mega_port}...")
-            s_mega = serial.Serial(mega_port, SERIAL_BAUD, timeout=1)
-            time.sleep(3.5)  # The Mega still needs 3.5s to wake up!
-            
-            s_mega.reset_input_buffer()
-            s_mega.write(b"WHOAMI\n")
-            time.sleep(0.5)
-            
-            response = s_mega.readline().decode('utf-8', errors='ignore').strip()
-            if "I_AM_MEGA" in response:
-                mega_serial = s_mega
-                print(f"[SYSTEM] ✓ MEGA successfully verified on {mega_port}")
-            else:
-                print(f"[SYSTEM] ⚠ MEGA failed verification. Responded: {response}")
-        except Exception as e:
-            print(f"[SYSTEM] ⚠ MEGA port error: {e}")
-    else:
-        print("[SYSTEM] ⚠ FATAL: No /dev/ttyUSB* ports found! Is the Mega plugged in?")
-
-    # ------------------------------------------------
-    # 2. CONNECT TO UNO
-    # ------------------------------------------------
-    if acm_ports:
-        uno_port = acm_ports[0] # Grab whatever number it is today
-        try:
-            print(f"[SYSTEM] Attempting UNO on {uno_port}...")
-            s_uno = serial.Serial(uno_port, SERIAL_BAUD, timeout=1)
-            time.sleep(2)  # Uno wakes up faster
-            
-            s_uno.reset_input_buffer()
-            s_uno.write(b"WHOAMI\n")
-            time.sleep(0.5)
-            
-            response = s_uno.readline().decode('utf-8', errors='ignore').strip()
-            if "I_AM_UNO" in response:
-                uno_serial = s_uno
-                print(f"[SYSTEM] ✓ UNO successfully verified on {uno_port}")
-            else:
-                print(f"[SYSTEM] ⚠ UNO failed verification. Responded: {response}")
-        except Exception as e:
-            print(f"[SYSTEM] ⚠ UNO port error: {e}")
-    else:
-        print("[SYSTEM] ⚠ FATAL: No /dev/ttyACM* ports found! Is the Uno plugged in?")
-
-    # ------------------------------------------------
-    # 3. FINAL SAFETY CHECK
-    # ------------------------------------------------
-    if not uno_serial or not mega_serial:
-        print("\n[SYSTEM] ⚠ FATAL: Could not connect to both Arduinos.")
+    # Block the script from moving forward until BOTH are found
+    while not uno_serial or not mega_serial:
         
+        # ------------------------------------------------
+        # 1. HUNT FOR THE MEGA (CH340 Chips -> /dev/ttyUSB*)
+        # ------------------------------------------------
+        if not mega_serial:
+            usb_ports = glob.glob('/dev/ttyUSB*')
+            for port in usb_ports:
+                try:
+                    print(f"[SYSTEM] Probing {port} for MEGA...")
+                    s = serial.Serial(port, SERIAL_BAUD, timeout=1)
+                    time.sleep(3.5)  # Mega slow bootloader delay
+                    
+                    s.reset_input_buffer()
+                    s.write(b"WHOAMI\n")
+                    time.sleep(0.5)
+                    
+                    response = s.readline().decode('utf-8', errors='ignore').strip()
+                    if "I_AM_MEGA" in response:
+                        mega_serial = s
+                        print(f"[SYSTEM] \u2713 MEGA locked in on {port}")
+                        break  # Stop checking USB ports, we found it!
+                    else:
+                        s.close() # CRITICAL: Free up the port if it's the wrong device
+                except Exception as e:
+                    print(f"[SYSTEM] \u26A0 Skipping {port}: {e}")
+                    pass
+
+        # ------------------------------------------------
+        # 2. HUNT FOR THE UNO (Native USB Chips -> /dev/ttyACM*)
+        # ------------------------------------------------
+        if not uno_serial:
+            acm_ports = glob.glob('/dev/ttyACM*')
+            for port in acm_ports:
+                try:
+                    print(f"[SYSTEM] Probing {port} for UNO...")
+                    s = serial.Serial(port, SERIAL_BAUD, timeout=1)
+                    time.sleep(2.5)  # Uno R4 boot delay
+                    
+                    s.reset_input_buffer()
+                    s.write(b"WHOAMI\n")
+                    time.sleep(0.5)
+                    
+                    response = s.readline().decode('utf-8', errors='ignore').strip()
+                    if "I_AM_UNO" in response:
+                        uno_serial = s
+                        print(f"[SYSTEM] \u2713 UNO locked in on {port}")
+                        break  # Stop checking ACM ports, we found it!
+                    else:
+                        s.close() # CRITICAL: Free up the port if it's the wrong device
+                except Exception as e:
+                    print(f"[SYSTEM] \u26A0 Skipping {port}: {e}")
+                    pass
+
+        # ------------------------------------------------
+        # 3. CHECK STATUS & RETRY
+        # ------------------------------------------------
+        if not uno_serial or not mega_serial:
+            missing = []
+            if not uno_serial: missing.append("UNO")
+            if not mega_serial: missing.append("MEGA")
+            
+            print(f"[SYSTEM] \u231B Still waiting for {', '.join(missing)}... Retrying in 2 seconds.")
+            time.sleep(2) # Prevent spamming the terminal, wait before scanning again
+
+    print("[SYSTEM] =========================================")
+    print("[SYSTEM] \u2713 ALL HARDWARE CONNECTED AND VERIFIED")
+    print("[SYSTEM] =========================================\n")
+            
     return uno_serial, mega_serial
