@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rover Control</title>
+
+<style>
+body {
+    font-family: monospace;
+    background: #0a0e27;
+    color: #00ff88;
+    text-align: center;
+    padding: 20px;
+}
+
+button {
+    padding: 12px 20px;
+    margin: 5px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+#status {
+    margin: 10px;
+    padding: 10px;
+    border: 2px solid #00ff88;
+}
+
+.dashboard {
+    margin-top: 20px;
+}
+
+.status-box {
+    border: 1px solid #00ff88;
+    padding: 10px;
+    margin: 5px;
+}
+
+#voiceBox {
+    margin-top: 20px;
+    padding: 10px;
+    border: 2px dashed #00ffff;
+}
+</style>
+</head>
+
+<body>
+
+<h2>ROVER CONTROL</h2>
+
+<button id="connectBtn">CONNECT</button>
+<div id="status">DISCONNECTED</div>
+
+<div id="voiceBox">
+    <button id="voiceBtn">🎤 START VOICE</button>
+    <div id="voiceText">Say a command...</div>
+</div>
+
+<div class="dashboard">
+    <div class="status-box">Audio: <span id="audioStatus">--</span></div>
+    <div class="status-box">Camera: <span id="cameraStatus">--</span></div>
+    <div class="status-box">UNO: <span id="unoStatus">--</span></div>
+    <div class="status-box">MEGA: <span id="megaStatus">--</span></div>
+    <div class="status-box">Motion: <span id="motionStatus">--</span></div>
+    <div class="status-box">Checkpoint: <span id="checkpointStatus">--</span></div>
+</div>
+
+<br>
+
+<button onclick="sendProjectCommand('1')">Project 1</button>
+<button onclick="sendProjectCommand('2')">Project 2</button>
+<button onclick="sendProjectCommand('3')">Project 3</button>
+<button onclick="sendProjectCommand('4')">Project 4</button>
+
+<br><br>
+
+<button onclick="sendCommand('S')">STOP</button>
+
+<script>
+
+// ================= BLE =================
+const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const UART_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+let rxCharacteristic;
+let txCharacteristic;
+
+async function connectBLE() {
+    try {
+        status.innerText = "Connecting...";
+
+        const device = await navigator.bluetooth.requestDevice({
+            filters: [{ name: "RoverBLE" }],
+            optionalServices: [UART_SERVICE_UUID]
+        });
+
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(UART_SERVICE_UUID);
+
+        rxCharacteristic = await service.getCharacteristic(UART_RX_CHAR_UUID);
+        txCharacteristic = await service.getCharacteristic(UART_TX_CHAR_UUID);
+
+        await txCharacteristic.startNotifications();
+
+        txCharacteristic.addEventListener("characteristicvaluechanged", (e) => {
+            let msg = new TextDecoder().decode(e.target.value);
+            handleIncoming(msg);
+        });
+
+        status.innerText = "CONNECTED";
+
+    } catch (err) {
+        status.innerText = "ERROR";
+        console.error(err);
+    }
+}
+
+document.getElementById("connectBtn").addEventListener("click", connectBLE);
+
+// ================= SEND =================
+async function sendCommand(cmd) {
+    if (!rxCharacteristic) return;
+    let data = new TextEncoder().encode(cmd);
+    await rxCharacteristic.writeValue(data);
+}
+
+function sendProjectCommand(code) {
+    sendCommand(code);
+}
+
+// ================= STATUS =================
+function handleIncoming(msg) {
+    console.log("FROM ROVER:", msg);
+
+    if (msg === "AUDIO_OK") audioStatus.innerText = "OK";
+    else if (msg === "AUDIO_FAIL") audioStatus.innerText = "FAIL";
+
+    else if (msg === "CAMERA_OK") cameraStatus.innerText = "OK";
+    else if (msg === "CAMERA_FAIL") cameraStatus.innerText = "FAIL";
+
+    else if (msg === "UNO_CONNECTED") unoStatus.innerText = "CONNECTED";
+    else if (msg === "MEGA_CONNECTED") megaStatus.innerText = "CONNECTED";
+
+    else if (msg === "MOVING") motionStatus.innerText = "MOVING";
+    else if (msg === "DONE") motionStatus.innerText = "DONE";
+    else if (msg === "PAUSED") motionStatus.innerText = "PAUSED";
+
+    else if (msg.startsWith("CHECKPOINT:")) {
+        checkpointStatus.innerText = msg.split(":")[1];
+    }
+
+    else {
+        status.innerText = msg;
+    }
+}
+
+// ================= VOICE =================
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+let recognition;
+let listening = false;
+
+if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onresult = (event) => {
+        let text = "";
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            text += event.results[i][0].transcript.toLowerCase();
+        }
+
+        voiceText.innerText = text;
+        processVoice(text);
+    };
+
+    recognition.onend = () => {
+        listening = false;
+        voiceBtn.innerText = "🎤 START VOICE";
+    };
+
+    voiceBtn.onclick = () => {
+        if (!listening) {
+            recognition.start();
+            listening = true;
+            voiceBtn.innerText = "🎤 LISTENING...";
+        } else {
+            recognition.stop();
+        }
+    };
+
+} else {
+    voiceText.innerText = "Voice not supported";
+}
+
+// ================= VOICE LOGIC =================
+const keywordMap = {
+    "1": ["generator", "system"],
+    "2": ["drone", "fire"],
+    "3": ["rickshaw", "alcohol"],
+    "4": ["water", "management"]
+};
+
+function processVoice(text) {
+
+    // ✅ PROJECT NUMBER DETECTION
+    let numMatch = text.match(/project\s*(\d)/);
+    if (numMatch) {
+        let num = numMatch[1];
+        voiceText.innerText = "Detected Project " + num;
+        sendProjectCommand(num);
+        return;
+    }
+
+    // ✅ DIRECT NUMBER
+    let directNum = text.match(/\b(1|2|3|4)\b/);
+    if (directNum) {
+        sendProjectCommand(directNum[1]);
+        return;
+    }
+
+    // ✅ KEYWORD MATCH
+    for (let proj in keywordMap) {
+        for (let word of keywordMap[proj]) {
+            if (text.includes(word)) {
+                voiceText.innerText = `Detected "${word}" → Project ${proj}`;
+                sendProjectCommand(proj);
+                return;
+            }
+        }
+    }
+}
+
+</script>
+
+</body>
+</html>
